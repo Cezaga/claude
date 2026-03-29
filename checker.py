@@ -70,6 +70,11 @@ def run_checker(
         username, password = combo
         proxy = proxy_manager.get() if proxy_manager else None
         result = check_account(username, password, proxy=proxy, timeout=timeout)
+
+        # If proxy failed, retry without proxy as fallback
+        if result.status == "ERROR" and proxy and "Proxy" in result.error_message:
+            result = check_account(username, password, proxy=None, timeout=timeout)
+
         stats.update(result)
         with results_lock:
             results.append(result)
