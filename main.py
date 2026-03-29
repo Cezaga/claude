@@ -13,6 +13,9 @@ import time
 import warnings
 import urllib3
 
+warnings.filterwarnings("ignore")
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -25,9 +28,6 @@ from formatter import save_results
 from models import AccountResult
 from proxy_manager import ProxyManager
 
-# Suppress warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-warnings.filterwarnings("ignore")
 
 console = Console()
 
