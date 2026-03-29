@@ -1,0 +1,245 @@
+==============================================================
+   LOL HESAP CHECKER - KURULUM VE KULLANIM REHBERI
+   (Hicbir sey bilmeyenler icin adim adim anlatim)
+==============================================================
+
+
+ADIM 1: PYTHON YUKLE
+--------------------------------------------------------------
+Python bu programin calismasini saglayan bir yazilimdir.
+Onsuz program calismaz.
+
+1. Tarayicini ac (Chrome, Firefox vs.)
+2. Adres cubuguna yaz: python.org
+3. Siteye girince ust tarafta "Downloads" butonuna tikla
+4. Buyuk sari "Download Python 3.x.x" butonuna tikla
+5. Dosya inecek, indirilen dosyayi cift tikla
+6. ONEMLI: Acilan pencerede EN ALTTA "Add Python to PATH"
+   yazisinin yanindaki kutuyu TIKLA (isaretlenmeli)
+7. Sonra "Install Now" butonuna tikla
+8. Kurulum bitene kadar bekle
+9. "Close" a tikla
+
+
+ADIM 2: PROJEYI INDIR
+--------------------------------------------------------------
+1. Tarayicinda su adrese git:
+   https://github.com/cezaga/claude
+
+2. Sayfada yesil "Code" butonuna tikla
+3. "Download ZIP" e tikla
+4. ZIP dosyasi inecek
+5. Indirilen ZIP dosyasina sag tikla
+6. "Buraya Cikart" veya "Extract Here" e tikla
+7. Bir klasor olusacak, icine gir
+8. Icinde su dosyalari goreceksin:
+   - main.py
+   - auth.py
+   - checker.py
+   - config.py
+   - formatter.py
+   - models.py
+   - proxy_manager.py
+   - requirements.txt
+
+
+ADIM 3: KOMUT SATIRINI AC
+--------------------------------------------------------------
+1. Dosyalarin oldugu klasore gir
+2. Klasorun ust tarafindaki adres cubuguna tikla
+   (dosya yolunun yazdigi yer)
+3. Oradaki yaziyi sil ve "cmd" yaz
+4. Enter a bas
+5. Siyah bir pencere (komut satiri) acilacak
+
+
+ADIM 4: GEREKEN KUTUPHANELERI KUR
+--------------------------------------------------------------
+Acilan siyah pencereye su yaziyi yaz ve Enter a bas:
+
+   pip install -r requirements.txt
+
+Bir seyler inecek, bekle. "Successfully installed" yazisi
+cikarsa basarili demektir.
+
+Eger hata verirse su komutu dene:
+
+   pip3 install -r requirements.txt
+
+Hala hata veriyorsa Python kurulumunda PATH isaretlemeyi
+unutmus olabilirsin. Adim 1 e don ve tekrar kur.
+
+
+ADIM 5: COMBO DOSYASI HAZIRLA (HESAPLAR)
+--------------------------------------------------------------
+Combo dosyasi = kontrol etmek istedigin hesaplarin listesi
+
+1. Programin oldugu klasorde sag tikla
+2. Yeni > Metin Belgesi (Text Document) e tikla
+3. Dosyanin adini "combos.txt" yap
+4. Dosyayi cift tiklayip Notepad ile ac
+5. Her satira bir hesap yaz, su formatta:
+
+   kullaniciadi:sifre
+
+   Ornek:
+   ahmet123:sifrem123
+   mehmet456:gizlisifre
+   ayse789:12345678
+
+6. Kaydet (Ctrl+S) ve kapat
+
+NOT: Kullanici adi ve sifre arasinda : (iki nokta) olmali.
+     Her hesap ayri satirda olmali.
+
+
+ADIM 6: PROXY DOSYASI HAZIRLA (OPSIYONEL AMA ONEMLI)
+--------------------------------------------------------------
+Proxy nedir?
+Internetine farkli IP adresleri ekler. Boylece Riot seni
+engellemez (rate limit yemezsin). Proxy olmadan calistirirsan
+birkac hesaptan sonra engellenebilirsin.
+
+Proxy nereden bulunur?
+- Google a "buy residential proxy" yaz
+- Webshare, ProxyScrape, Bright Data gibi sitelerden alinir
+- Ucretsiz proxyler genelde cok yavas ve guvenilmezdir
+
+Proxy dosyasi nasil hazirlanir:
+1. Programin oldugu klasorde sag tikla
+2. Yeni > Metin Belgesi e tikla
+3. Dosyanin adini "proxies.txt" yap
+4. Notepad ile ac
+5. Her satira bir proxy yaz:
+
+   Sadece IP ve port varsa:
+   123.45.67.89:8080
+
+   Kullanici adli proxy:
+   123.45.67.89:8080:kullanici:sifre
+
+   SOCKS5 proxy:
+   socks5://123.45.67.89:1080
+
+6. Kaydet ve kapat
+
+Proxy kullanmak ISTEMIYORSAN bu adimi atla.
+
+
+ADIM 7: PROGRAMI CALISTIR
+--------------------------------------------------------------
+Adim 3 teki gibi klasorde CMD ac (veya hala aciksa onu kullan).
+
+>> Proxylerle calistirmak icin su komutu yaz:
+
+   python main.py -c combos.txt -p proxies.txt -t 10
+
+>> Proxysiz calistirmak icin:
+
+   python main.py -c combos.txt -t 5
+
+Komuttaki sayilarin anlami:
+   -c combos.txt    = hesap dosyasinin adi
+   -p proxies.txt   = proxy dosyasinin adi
+   -t 10            = ayni anda 10 hesap kontrol et
+                      (bilgisayarin gucune gore artir/azalt)
+
+Enter a basinca program calisacak.
+Ekranda canli olarak ilerleme goreceksin:
+- Kac hesap kontrol edildi
+- Kac tanesi gecerli (valid)
+- Kac tanesi yanlis sifre (invalid)
+- Kac tanesi banli (banned)
+- Kac tanesinde hata var (errors)
+
+
+ADIM 8: SONUCLARA BAK
+--------------------------------------------------------------
+Program bitince "results" adinda bir klasor olusur.
+Icinde tarih-saat isimli bir klasor vardir. Ornek:
+   results/20260329_143022/
+
+Bu klasorun icindeki dosyalar:
+
+   valid.txt
+   --------
+   Gecerli (giris yapilabilen) tum hesaplar.
+   Her satir: kullanici:sifre | bolge | level | rank | RP | BE | skin | sampiyon
+
+   invalid.txt
+   -----------
+   Yanlis sifre olan hesaplar.
+
+   banned.txt
+   ----------
+   Banlanmis hesaplar.
+
+   errors.txt
+   ----------
+   Hata veren hesaplar (timeout, proxy hatasi vs.)
+
+   2fa.txt
+   -------
+   Iki adimli dogrulama (2FA) acik olan hesaplar.
+   Bu hesaplara giris yapilamaz ama gecerli oldugu bilinir.
+
+   full_report.txt
+   ---------------
+   Her gecerli hesabin TUM detaylari alt alta yazili.
+
+   by_region/ (klasor)
+   ----------
+   Hesaplar sunucuya gore gruplanmis.
+   Ornek: TR.txt, EUW.txt, NA.txt, KR.txt vs.
+
+   by_rank/ (klasor)
+   ---------
+   Hesaplar ranka gore gruplanmis.
+   Ornek: CHALLENGER.txt, DIAMOND.txt, GOLD.txt, UNRANKED.txt vs.
+
+   by_level/ (klasor)
+   ----------
+   Hesaplar level araligina gore gruplanmis.
+   Ornek: 1-30.txt, 31-50.txt, 51-100.txt, 101-200.txt vs.
+
+   by_skins/ (klasor)
+   ----------
+   Hesaplar skin sayisina gore gruplanmis.
+   Ornek: 0_skins.txt, 1-10_skins.txt, 100+_skins.txt vs.
+
+   by_rp/ (klasor)
+   -------
+   Hesaplar RP miktarina gore gruplanmis.
+   Ornek: 0_rp.txt, 1-500_rp.txt, 2000+_rp.txt vs.
+
+   by_blue_essence/ (klasor)
+   -----------------
+   Hesaplar mavi oz (BE) miktarina gore gruplanmis.
+   Ornek: 0-1000_be.txt, 50000+_be.txt vs.
+
+
+SORUN GIDERME
+--------------------------------------------------------------
+HATA: "python bulunamadi" veya "is not recognized"
+COZUM: Python kurulumunda PATH isaretlemeyi unutmusSun.
+       Python i kaldir, tekrar kur, PATH kutusunu isaretLe.
+
+HATA: "No module named rich" veya "No module named httpx"
+COZUM: Adim 4 u tekrar yap (pip install -r requirements.txt)
+
+HATA: Cok fazla "Rate Limited" veya "Error" cikiyor
+COZUM: Proxy kullan veya thread sayisini dusur (-t 3 gibi)
+
+HATA: "Combo file not found"
+COZUM: combos.txt dosyasinin programla AYNI klasorde
+       oldugunden emin ol.
+
+HATA: Hicbir hesap "valid" cikmiyor
+COZUM: Combo dosyasindaki format dogru mu kontrol et.
+       Her satir: kullaniciadi:sifre seklinde olmali.
+       Bosluk veya fazla karakter olmaMALI.
+
+
+==============================================================
+   Sorularin varsa GitHub uzerinden iletisime gecebilirsin.
+==============================================================
