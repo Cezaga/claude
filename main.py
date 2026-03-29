@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import warnings
 import urllib3
 
 from rich.console import Console
@@ -24,8 +25,9 @@ from formatter import save_results
 from models import AccountResult
 from proxy_manager import ProxyManager
 
-# Suppress insecure request warnings (self-signed cert in Riot auth)
+# Suppress warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings("ignore")
 
 console = Console()
 
@@ -39,7 +41,8 @@ BANNER = r"""
 """
 
 
-def build_status_table(stats: CheckerStats, recent: list[str]) -> Table:
+def build_status_table(stats: CheckerStats, recent: list[str], error_lines: list[str] | None = None) -> Table:
+    error_lines = error_lines or []
     """Build a live-updating status table."""
     table = Table(title="Checker Status", expand=True, border_style="blue")
     table.add_column("Metric", style="cyan", width=15)
@@ -57,6 +60,14 @@ def build_status_table(stats: CheckerStats, recent: list[str]) -> Table:
     table.add_row("Banned", f"[yellow]{stats.banned}[/]", "")
     table.add_row("2FA", f"[magenta]{stats.twofa}[/]", "")
     table.add_row("Errors", f"[red]{stats.errors}[/]", "")
+
+    if error_lines:
+        table.add_row("", "", "")
+        table.add_row(
+            "[red]Last Errors[/]",
+            "",
+            "\n".join(error_lines[-5:]),
+        )
 
     return table
 
@@ -80,6 +91,9 @@ def main():
     )
     parser.add_argument(
         "-o", "--output", default="results", help="Output directory"
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Show error details live"
     )
 
     args = parser.parse_args()
@@ -118,9 +132,14 @@ def main():
 
     start_time = time.time()
 
+    # Error tracking for verbose mode
+    recent_errors: list[str] = []
+
     def on_result(result: AccountResult, stats: CheckerStats):
         if result.status == "VALID":
             recent_hits.append(result.summary_line())
+        elif args.verbose and result.error_message:
+            recent_errors.append(f"{result.username}: {result.error_message}")
 
     # Run checker with live display
     with Live(
@@ -134,7 +153,7 @@ def main():
         def on_result_live(result: AccountResult, stats: CheckerStats):
             _stats_ref[0] = stats
             on_result(result, stats)
-            live.update(build_status_table(stats, recent_hits))
+            live.update(build_status_table(stats, recent_hits, recent_errors))
 
         results = run_checker(
             combos,
