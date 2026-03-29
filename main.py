@@ -59,6 +59,7 @@ def build_status_table(stats: CheckerStats, recent: list[str], error_lines: list
     table.add_row("Invalid", f"[red]{stats.invalid}[/]", "")
     table.add_row("Banned", f"[yellow]{stats.banned}[/]", "")
     table.add_row("2FA", f"[magenta]{stats.twofa}[/]", "")
+    table.add_row("Rate Limited", f"[yellow]{stats.rate_limited}[/]", "")
     table.add_row("Errors", f"[red]{stats.errors}[/]", "")
 
     if error_lines:
@@ -93,6 +94,10 @@ def main():
         "-o", "--output", default="results", help="Output directory"
     )
     parser.add_argument(
+        "-d", "--delay", type=float, default=0,
+        help="Delay between checks in seconds (helps avoid rate limits)"
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Show error details live"
     )
 
@@ -124,7 +129,11 @@ def main():
         else:
             console.print(f"[cyan]Loaded {proxy_manager.count} proxies[/]")
 
-    console.print(f"[cyan]Threads: {args.threads} | Timeout: {args.timeout}s[/]")
+    console.print(
+        f"[cyan]Threads: {args.threads} | Timeout: {args.timeout}s"
+        + (f" | Delay: {args.delay}s" if args.delay else "")
+        + "[/]"
+    )
     console.print()
 
     # Recent hits list (shared state for display)
@@ -160,6 +169,7 @@ def main():
             proxy_manager=proxy_manager,
             threads=args.threads,
             timeout=args.timeout,
+            delay=args.delay,
             callback=on_result_live,
         )
 

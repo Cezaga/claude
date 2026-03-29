@@ -3,6 +3,7 @@
 import itertools
 import threading
 from pathlib import Path
+from urllib.parse import quote
 
 
 class ProxyManager:
@@ -46,12 +47,26 @@ class ProxyManager:
         if proxy.startswith(("http://", "https://", "socks5://", "socks4://")):
             return proxy
 
+        # Format: user:pass@host:port
+        if "@" in proxy:
+            auth_part, host_part = proxy.rsplit("@", 1)
+            if ":" in auth_part:
+                user, pwd = auth_part.split(":", 1)
+                # URL-encode user and password for special characters
+                user = quote(user, safe="")
+                pwd = quote(pwd, safe="")
+                return f"http://{user}:{pwd}@{host_part}"
+            return f"http://{proxy}"
+
         parts = proxy.split(":")
+        # Format: ip:port:user:pass
         if len(parts) == 4:
             ip, port, user, pwd = parts
+            user = quote(user, safe="")
+            pwd = quote(pwd, safe="")
             return f"http://{user}:{pwd}@{ip}:{port}"
+        # Format: ip:port
         if len(parts) == 2:
             return f"http://{parts[0]}:{parts[1]}"
-        if "@" in proxy:
-            return f"http://{proxy}"
+
         return f"http://{proxy}"

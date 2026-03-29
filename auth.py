@@ -69,6 +69,11 @@ def check_account(
             if verbose:
                 result.error_message = f"init:{init_resp.status_code}"
 
+            if init_resp.status_code == 429:
+                result.status = "RATE_LIMITED"
+                result.error_message = "Rate limited (init)"
+                return result
+
             if init_resp.status_code not in (200, 201):
                 result.status = "ERROR"
                 result.error_message = f"Init failed: HTTP {init_resp.status_code}"
@@ -86,6 +91,11 @@ def check_account(
                 "language": "en_US",
             }
             resp = client.put(AUTH_URL, json=auth_body)
+
+            if resp.status_code == 429:
+                result.status = "RATE_LIMITED"
+                result.error_message = "Rate limited"
+                return result
 
             if resp.status_code not in (200, 201):
                 result.status = "ERROR"

